@@ -81,17 +81,21 @@ class LayerCategoryLabel(QObject):
         if self.check_timer:
             self.check_timer.stop()
         
+        # Cleanup più sicuro
         try:
             self.project.layerWasAdded.disconnect(self.on_layer_added)
-        except:
+        except (TypeError, RuntimeError):
+            # Il segnale era già scollegato o non esisteva
             pass
+        
         try:
             self.project.layerRemoved.disconnect(self.on_layer_removed)
-        except:
+        except (TypeError, RuntimeError):
             pass
+            
         try:
             self.project.layersWillBeRemoved.disconnect(self.on_layers_will_be_removed)
-        except:
+        except (TypeError, RuntimeError):
             pass
         
         # Ripristina i nomi originali di tutti i layer
