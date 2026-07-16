@@ -50,7 +50,7 @@ GPL 2.0 or later
 
 ## Changelog
 
-### v1.0.0 (Initial Release)
+### v1.0.2 (Initial Release)
 
 * Automatic layer monitoring
 * Display categorization field in layer name
