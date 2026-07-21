@@ -19,6 +19,7 @@ class LayerCategoryLabel(QObject):
         self.layer_original_names = {}
         self.check_timer = None
         self.processing = False
+        self.connected_layer_ids = set()
 
         plugin_dir = Path(__file__).parent
         self.config_file = plugin_dir / ".layer_names_backup.json"
@@ -96,21 +97,31 @@ class LayerCategoryLabel(QObject):
         self.processing = True
         try:
             for layer in self.project.mapLayers().values():
+                self.connect_layer_signals(layer)
                 self.update_layer_label(layer)
         finally:
             self.processing = False
         self.save_stored_names()
 
-    def on_layer_added(self, layer):
+    def connect_layer_signals(self, layer):
         if not isinstance(layer, QgsVectorLayer):
+            return
+        if layer.id() in self.connected_layer_ids:
             return
         try:
             layer.rendererChanged.connect(lambda l=layer: self.update_layer_label(l))
+            self.connected_layer_ids.add(layer.id())
         except (TypeError, RuntimeError):
             pass
+
+    def on_layer_added(self, layer):
+        if not isinstance(layer, QgsVectorLayer):
+            return
+        self.connect_layer_signals(layer)
         QTimer.singleShot(300, lambda: self.update_layer_label(layer))
 
     def on_layer_removed(self, layer_id):
+        self.connected_layer_ids.discard(layer_id)
         if layer_id in self.layer_original_names:
             del self.layer_original_names[layer_id]
             self.save_stored_names()
@@ -118,6 +129,7 @@ class LayerCategoryLabel(QObject):
     def on_layers_will_be_removed(self, layer_ids):
         changed = False
         for layer_id in layer_ids:
+            self.connected_layer_ids.discard(layer_id)
             if layer_id in self.layer_original_names:
                 del self.layer_original_names[layer_id]
                 changed = True
