@@ -109,7 +109,7 @@ class LayerCategoryLabel(QObject):
         if layer.id() in self.connected_layer_ids:
             return
         try:
-            layer.rendererChanged.connect(lambda l=layer: self.update_layer_label(l))
+            layer.rendererChanged.connect(lambda target_layer=layer: self.update_layer_label(target_layer))
             self.connected_layer_ids.add(layer.id())
         except (TypeError, RuntimeError):
             pass
