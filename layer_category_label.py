@@ -1,4 +1,5 @@
 import json
+from functools import partial
 from pathlib import Path
 from qgis.core import (
     QgsProject, QgsVectorLayer, QgsCategorizedSymbolRenderer,
@@ -20,6 +21,7 @@ class LayerCategoryLabel(QObject):
         self.check_timer = None
         self.processing = False
         self.connected_layer_ids = set()
+        self.layer_signal_slots = {}  # layer_id -> partial callable (riferimento forte)
 
         plugin_dir = Path(__file__).parent
         self.config_file = plugin_dir / ".layer_names_backup.json"
@@ -55,6 +57,16 @@ class LayerCategoryLabel(QObject):
                 signal.disconnect(slot)
             except (TypeError, RuntimeError):
                 pass
+
+        for layer_id, slot in list(self.layer_signal_slots.items()):
+            layer = self.project.mapLayer(layer_id)
+            if layer:
+                try:
+                    layer.rendererChanged.disconnect(slot)
+                except (TypeError, RuntimeError):
+                    pass
+        self.layer_signal_slots.clear()
+        self.connected_layer_ids.clear()
 
         for layer_id, original_name in self.layer_original_names.items():
             layer = self.project.mapLayer(layer_id)
@@ -106,13 +118,28 @@ class LayerCategoryLabel(QObject):
     def connect_layer_signals(self, layer):
         if not isinstance(layer, QgsVectorLayer):
             return
-        if layer.id() in self.connected_layer_ids:
-            return
+        layer_id = layer.id()
+
+        # Se esiste già una connessione precedente, la rimuoviamo prima di
+        # ricrearla: evita sia i duplicati sia il rischio di restare con
+        # una connessione "morta" senza più ritentare (bug della v1.0.7).
+        old_slot = self.layer_signal_slots.get(layer_id)
+        if old_slot is not None:
+            try:
+                layer.rendererChanged.disconnect(old_slot)
+            except (TypeError, RuntimeError):
+                pass
+
+        slot = partial(self.update_layer_label, layer)
         try:
-            layer.rendererChanged.connect(lambda target_layer=layer: self.update_layer_label(target_layer))
-            self.connected_layer_ids.add(layer.id())
-        except (TypeError, RuntimeError):
-            pass
+            layer.rendererChanged.connect(slot)
+            self.layer_signal_slots[layer_id] = slot  # riferimento forte: evita garbage collection
+            self.connected_layer_ids.add(layer_id)
+        except (TypeError, RuntimeError) as e:
+            QgsMessageLog.logMessage(
+                f"Impossibile connettere il segnale per layer '{layer.name()}': {e}",
+                "LayerCategoryLabel", Qgis.Warning
+            )
 
     def on_layer_added(self, layer):
         if not isinstance(layer, QgsVectorLayer):
@@ -122,6 +149,7 @@ class LayerCategoryLabel(QObject):
 
     def on_layer_removed(self, layer_id):
         self.connected_layer_ids.discard(layer_id)
+        self.layer_signal_slots.pop(layer_id, None)
         if layer_id in self.layer_original_names:
             del self.layer_original_names[layer_id]
             self.save_stored_names()
@@ -130,6 +158,7 @@ class LayerCategoryLabel(QObject):
         changed = False
         for layer_id in layer_ids:
             self.connected_layer_ids.discard(layer_id)
+            self.layer_signal_slots.pop(layer_id, None)
             if layer_id in self.layer_original_names:
                 del self.layer_original_names[layer_id]
                 changed = True
