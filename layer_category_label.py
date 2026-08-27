@@ -2,16 +2,21 @@ import json
 from functools import partial
 from pathlib import Path
 from qgis.core import (
-    QgsProject, QgsVectorLayer, QgsCategorizedSymbolRenderer,
-    Qgis, QgsMessageLog
+    QgsProject, QgsVectorLayer,
+    QgsCategorizedSymbolRenderer, QgsGraduatedSymbolRenderer, QgsRuleBasedRenderer,
+    Qgis, QgsMessageLog, QgsSettings
 )
 from qgis.gui import QgisInterface
 from qgis.PyQt.QtCore import QObject, QTimer
+from qgis.PyQt.QtGui import QIcon
+from qgis.PyQt.QtWidgets import QAction
 
 
 class LayerCategoryLabel(QObject):
 
     SEPARATOR = " ● ["
+    RULES_LABEL = "Regole"
+    SETTINGS_KEY = "LayerCategoryLabel/enabled"
 
     def __init__(self, iface: QgisInterface):
         super().__init__()
@@ -20,11 +25,14 @@ class LayerCategoryLabel(QObject):
         self.layer_original_names = {}
         self.check_timer = None
         self.processing = False
+        self.enabled = True
+        self.action = None
         self.connected_layer_ids = set()
         self.layer_signal_slots = {}  # layer_id -> partial callable (riferimento forte)
 
         plugin_dir = Path(__file__).parent
         self.config_file = plugin_dir / ".layer_names_backup.json"
+        self.icon_path = str(plugin_dir / "icons" / "icon.png")
 
     # ------------------------------------------------------------------
     # Entry point richiesto da QGIS
@@ -32,17 +40,57 @@ class LayerCategoryLabel(QObject):
     def initGui(self):
         self.layer_original_names = self.load_stored_names()
 
-        self.project.layerWasAdded.connect(self.on_layer_added)
-        self.project.layerRemoved.connect(self.on_layer_removed)
-        self.project.layersWillBeRemoved.connect(self.on_layers_will_be_removed)
+        # Stato ON/OFF persistente tra sessioni QGIS
+        self.enabled = QgsSettings().value(self.SETTINGS_KEY, True, type=bool)
+
+        self.action = QAction(QIcon(self.icon_path), "Layer Category Label", self.iface.mainWindow())
+        self.action.setCheckable(True)
+        self.action.setChecked(self.enabled)
+        self.action.setToolTip("Attiva/disattiva Layer Category Label")
+        self.action.toggled.connect(self.on_toggle)
+        self.iface.addToolBarIcon(self.action)
+        self.iface.addPluginToMenu("Layer Category Label", self.action)
+
         self.project.readProject.connect(self.on_project_loaded)
 
         self.check_timer = QTimer(self)
         self.check_timer.setSingleShot(True)
         self.check_timer.timeout.connect(self.check_all_layers)
-        self.check_timer.start(500)
+
+        if self.enabled:
+            self.activate()
 
     def unload(self):
+        self.deactivate(restore_names=True)
+
+        try:
+            self.project.readProject.disconnect(self.on_project_loaded)
+        except (TypeError, RuntimeError):
+            pass
+
+        if self.action:
+            self.iface.removePluginMenu("Layer Category Label", self.action)
+            self.iface.removeToolBarIcon(self.action)
+            self.action = None
+
+    # ------------------------------------------------------------------
+    # Toggle ON/OFF
+    # ------------------------------------------------------------------
+    def on_toggle(self, checked):
+        self.enabled = checked
+        QgsSettings().setValue(self.SETTINGS_KEY, checked)
+        if checked:
+            self.activate()
+        else:
+            self.deactivate(restore_names=True)
+
+    def activate(self):
+        self.project.layerWasAdded.connect(self.on_layer_added)
+        self.project.layerRemoved.connect(self.on_layer_removed)
+        self.project.layersWillBeRemoved.connect(self.on_layers_will_be_removed)
+        self.check_timer.start(500)
+
+    def deactivate(self, restore_names=False):
         if self.check_timer:
             self.check_timer.stop()
 
@@ -50,7 +98,6 @@ class LayerCategoryLabel(QObject):
             (self.project.layerWasAdded, self.on_layer_added),
             (self.project.layerRemoved, self.on_layer_removed),
             (self.project.layersWillBeRemoved, self.on_layers_will_be_removed),
-            (self.project.readProject, self.on_project_loaded),
         ]
         for signal, slot in signals_slots:
             try:
@@ -68,10 +115,11 @@ class LayerCategoryLabel(QObject):
         self.layer_signal_slots.clear()
         self.connected_layer_ids.clear()
 
-        for layer_id, original_name in self.layer_original_names.items():
-            layer = self.project.mapLayer(layer_id)
-            if layer and layer.name() != original_name:
-                layer.setName(original_name)
+        if restore_names:
+            for layer_id, original_name in self.layer_original_names.items():
+                layer = self.project.mapLayer(layer_id)
+                if layer and layer.name() != original_name:
+                    layer.setName(original_name)
 
     # ------------------------------------------------------------------
     # Persistenza nomi originali (evita accumulo del suffisso)
@@ -101,7 +149,8 @@ class LayerCategoryLabel(QObject):
     # Logica principale
     # ------------------------------------------------------------------
     def on_project_loaded(self):
-        self.check_timer.start(500)
+        if self.enabled:
+            self.check_timer.start(500)
 
     def check_all_layers(self):
         if self.processing:
@@ -176,12 +225,16 @@ class LayerCategoryLabel(QObject):
         if layer_id not in self.layer_original_names:
             self.layer_original_names[layer_id] = original_name
 
+        base_name = self.layer_original_names[layer_id]
         renderer = layer.renderer()
-        if isinstance(renderer, QgsCategorizedSymbolRenderer):
+
+        if isinstance(renderer, (QgsCategorizedSymbolRenderer, QgsGraduatedSymbolRenderer)):
             field_name = renderer.classAttribute()
-            new_name = f"{self.layer_original_names[layer_id]}{self.SEPARATOR}{field_name}]"
+            new_name = f"{base_name}{self.SEPARATOR}{field_name}]"
+        elif isinstance(renderer, QgsRuleBasedRenderer):
+            new_name = f"{base_name}{self.SEPARATOR}{self.RULES_LABEL}]"
         else:
-            new_name = self.layer_original_names[layer_id]
+            new_name = base_name
 
         if new_name != current_name:
             layer.setName(new_name)
